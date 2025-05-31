@@ -1,0 +1,129 @@
+#include <cuda_runtime.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string>
+#include <gmp.h>
+
+// ----------- DEVICE KERNEL AND HELPERS -----------
+
+__device__ bool isHashLessThanTarget(const uint8_t* hash, const uint8_t* target) {
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        if (hash[i] < target[i]) return true;
+        if (hash[i] > target[i]) return false;
+    }
+    return false; // equal is invalid
+}
+
+// Example stub - replace with your actual implementation!
+__device__ void blake2b_gpu(uint8_t* out, const uint8_t* in, size_t inlen) {
+    // TODO: Implement or call your GPU blake2b implementation
+    // For now just zero the output
+    for (int i = 0; i < 32; ++i) out[i] = 0;
+}
+
+__global__ void mine_kernel(
+    const uint8_t* header,
+    const uint8_t* target,
+    uint64_t nonce_start,
+    uint64_t nonce_range,
+    uint64_t* found_nonce,
+    int* found_flag,
+    uint8_t* output_hash
+) {
+    uint64_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t total_threads = gridDim.x * blockDim.x;
+    uint64_t nonce = nonce_start + thread_id;
+
+    while (nonce < nonce_start + nonce_range) {
+        if (*found_flag) return;
+
+        uint8_t input[40];
+        for (int i = 0; i < 32; i++) input[i] = header[i];
+        for (int i = 0; i < 8; i++) input[32 + i] = (nonce >> (8 * i)) & 0xFF;
+
+        uint8_t hash[32];
+        blake2b_gpu(hash, input, 40);
+
+        if (isHashLessThanTarget(hash, target)) {
+            if (atomicExch(found_flag, 1) == 0) {
+                *found_nonce = nonce;
+                for (int i = 0; i < 32; i++) output_hash[i] = hash[i];
+                printf("[GPU] Valid nonce found: %llu\n", (unsigned long long)nonce);
+            }
+            return;
+        }
+
+        nonce += total_threads;
+    }
+}
+
+// ----------- HOST-SIDE LAUNCH CODE -----------
+
+// Decode hex target string to 32-byte array
+void decodeTarget(const std::string& targetStr, uint8_t* targetBytes) {
+    mpz_t targetInt;
+    mpz_init_set_str(targetInt, targetStr.c_str(), 10);
+    size_t count = 0;
+    mpz_export(targetBytes, &count, 1, 1, 1, 0, targetInt);
+    for (size_t i = count; i < 32; ++i) {
+        targetBytes[i] = 0;
+    }
+    mpz_clear(targetInt);
+}
+
+bool launchMiningKernel(
+    const uint8_t* header,
+    const std::string& targetStr,
+    uint64_t nonceStart,
+    uint64_t nonceRange,
+    uint64_t& foundNonce,
+    uint8_t* foundHash
+) {
+    uint8_t* d_header;
+    uint8_t* d_target;
+    uint64_t* d_found_nonce;
+    int* d_found_flag;
+    uint8_t* d_output_hash;
+
+    cudaMalloc(&d_header, 32);
+    cudaMalloc(&d_target, 32);
+    cudaMalloc(&d_found_nonce, sizeof(uint64_t));
+    cudaMalloc(&d_found_flag, sizeof(int));
+    cudaMalloc(&d_output_hash, 32);
+
+    cudaMemcpy(d_header, header, 32, cudaMemcpyHostToDevice);
+
+    uint8_t targetBytes[32];
+    decodeTarget(targetStr, targetBytes);
+    cudaMemcpy(d_target, targetBytes, 32, cudaMemcpyHostToDevice);
+
+    cudaMemset(d_found_flag, 0, sizeof(int));
+
+    int threadsPerBlock = 128;
+    int blocksPerGrid = 64;
+
+    mine_kernel<<<blocksPerGrid, threadsPerBlock>>>(
+        d_header, d_target, nonceStart, nonceRange,
+        d_found_nonce, d_found_flag, d_output_hash
+    );
+
+    cudaDeviceSynchronize();
+
+    int flag;
+    cudaMemcpy(&flag, d_found_flag, sizeof(int), cudaMemcpyDeviceToHost);
+
+    if (flag) {
+        cudaMemcpy(&foundNonce, d_found_nonce, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        cudaMemcpy(foundHash, d_output_hash, 32, cudaMemcpyDeviceToHost);
+        printf("[KERNEL] Found nonce: %llu\n", foundNonce);
+    }
+
+    cudaFree(d_header);
+    cudaFree(d_target);
+    cudaFree(d_found_nonce);
+    cudaFree(d_found_flag);
+    cudaFree(d_output_hash);
+
+    return flag == 1;
+}
