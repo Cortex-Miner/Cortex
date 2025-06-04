@@ -1,0 +1,28 @@
+.App {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 2em;
+  background: #f3f1f9;
+  min-height: 100vh;
+}
+header {
+  text-align: center;
+}
+nav button {
+  margin: 0 1em;
+  font-size: 1em;
+  padding: 0.55em 1.4em;
+  border-radius: 7px;
+  border: 1px solid #8843F2;
+  background: #f3f1f9;
+  color: #242038;
+  cursor: pointer;
+  transition: 0.2s;
+}
+nav button:hover {
+  background: #8843F2;
+  color: white;
+}
+main {
+  margin-top: 2.5em;
+}

@@ -1,23 +1,26 @@
+// autolykos2_cuda_miner.cu
+
 #include "autolykos2_cuda_miner.h"
 #include "blake2b_cuda.cuh"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdint.h>
+#include <gmp.h>
+#include <string>
+
+// Reference blake2b_sigma table defined in blake2b_cuda.cu
+extern __constant__ uint8_t blake2b_sigma[12][16];
 
 #define AUTOLYKOS2_N 26
 #define AUTOLYKOS2_K 32
 #define AUTOLYKOS2_M (1 << AUTOLYKOS2_N)
 #define BLOCK_SIZE 256
 #define GRID_SIZE 1024
-
 #define NONCES_PER_ITER (BLOCK_SIZE * GRID_SIZE)
-#define THREADS_PER_ITER BLOCK_SIZE
 #define NUM_SIZE_32 8
 #define K_LEN 64
-#define BUF_SIZE_8 128
-#define MAX_SOLS 10
 
 #define B2B_IV(h) \
     do { \
@@ -31,70 +34,38 @@
         ((uint64_t *)(h))[7] = 0x5BE0CD19137E2179ULL; \
     } while(0)
 
-__device__ __forceinline__ uint32_t ld_gbl_cs(const  uint32_t * __restrict__ p) {
-    uint32_t v;
-    asm("ld.global.cs.u32 %0, [%1];" : "=r"(v) : "l"(p));
-    return v;
-}
-__device__ __forceinline__ uint4 ld_gbl_cs_v4(const  uint4 * __restrict__ p) {
-    uint4 v;
-    asm("ld.global.cs.v4.u32 {%0, %1, %2, %3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
-    return v;
-}
 __device__ __forceinline__ uint32_t cuda_swab32(uint32_t x) {
     return __byte_perm(x, x, 0x0123);
 }
-__device__ __forceinline__ uint64_t devectorize(uint2 x) {
-    uint64_t result;
-    asm("mov.b64 %0,{%1,%2}; \n\t"
-        : "=l"(result) : "r"(x.x), "r"(x.y));
-    return result;
-}
-__device__ __forceinline__ uint2 vectorize(const uint64_t x) {
-    uint2 result;
-    asm("mov.b64 {%0,%1},%2; \n\t"
-        : "=r"(result.x), "=r"(result.y) : "l"(x));
-    return result;
-}
-__device__ __forceinline__
-uint64_t devROTR64(uint64_t b, int offset) {
-    uint2 a;
-    uint2 result;
-    a = vectorize(b);
 
-    if (offset < 32) {
-        asm("shf.r.wrap.b32 %0, %1, %2, %3;" : "=r"(result.x) : "r"(a.x), "r"(a.y), "r"(offset));
-        asm("shf.r.wrap.b32 %0, %1, %2, %3;" : "=r"(result.y) : "r"(a.y), "r"(a.x), "r"(offset));
-    }
-    else {
-        asm("shf.r.wrap.b32 %0, %1, %2, %3;" : "=r"(result.x) : "r"(a.y), "r"(a.x), "r"(offset));
-        asm("shf.r.wrap.b32 %0, %1, %2, %3;" : "=r"(result.y) : "r"(a.x), "r"(a.y), "r"(offset));
-    }
-    return devectorize(result);
-}
-
-__device__ __forceinline__
-void devB2B_G(uint64_t* v, int a, int b, int c, int d, uint64_t x, uint64_t y) {
-    ((uint64_t *)(v))[a] += ((uint64_t *)(v))[b] + x;
-    ((uint64_t *)(v))[d]
-        = devROTR64(((uint64_t *)(v))[d] ^ ((uint64_t *)(v))[a], 32);
-    ((uint64_t *)(v))[c] += ((uint64_t *)(v))[d];
-    ((uint64_t *)(v))[b]
-        = devROTR64(((uint64_t *)(v))[b] ^ ((uint64_t *)(v))[c], 24);
-    ((uint64_t *)(v))[a] += ((uint64_t *)(v))[b] + y;
-    ((uint64_t *)(v))[d]
-        = devROTR64(((uint64_t *)(v))[d] ^ ((uint64_t *)(v))[a], 16);
-    ((uint64_t *)(v))[c] += ((uint64_t *)(v))[d];
-    ((uint64_t *)(v))[b]
-        = devROTR64(((uint64_t *)(v))[b] ^ ((uint64_t *)(v))[c], 63);
+__device__ __forceinline__ uint64_t devROTR64(uint64_t b, int offset) {
+    return (b >> offset) | (b << (64 - offset));
 }
 
 __device__ __forceinline__
 void devB2B_MIX(uint64_t* v, uint64_t* m) {
-    // ... (same as your posted code, omitted for brevity, leave unchanged)
-    // Keep your MIX implementation as-is unless you know it's wrong.
-    // Otherwise this answer is too long for ChatGPT's limits.
-    // (Just keep your existing body here.)
+    for (int r = 0; r < 12; ++r) {
+        #define G(a,b,c,d,x,y) \
+            v[a] = v[a] + v[b] + m[blake2b_sigma[r][x]]; \
+            v[d] = devROTR64(v[d] ^ v[a], 32); \
+            v[c] = v[c] + v[d]; \
+            v[b] = devROTR64(v[b] ^ v[c], 24); \
+            v[a] = v[a] + v[b] + m[blake2b_sigma[r][y]]; \
+            v[d] = devROTR64(v[d] ^ v[a], 16); \
+            v[c] = v[c] + v[d]; \
+            v[b] = devROTR64(v[b] ^ v[c], 63);
+
+        const uint8_t* s = blake2b_sigma[r];
+        G(0,4,8,12,0,1);
+        G(1,5,9,13,2,3);
+        G(2,6,10,14,4,5);
+        G(3,7,11,15,6,7);
+        G(0,5,10,15,8,9);
+        G(1,6,11,12,10,11);
+        G(2,7,8,13,12,13);
+        G(3,4,9,14,14,15);
+        #undef G
+    }
 }
 
 const __constant__ uint64_t ivals[8] = {
@@ -110,7 +81,18 @@ const __constant__ uint64_t ivals[8] = {
 
 __constant__ uint8_t bound_[32];
 
-// Function to copy the target boundary to constant memory
+void decodeTarget(const std::string& targetStr, uint8_t* targetBytes) {
+    mpz_t targetInt;
+    mpz_init_set_str(targetInt, targetStr.c_str(), 10);
+    uint8_t be_bytes[32] = {0};
+    size_t count = 0;
+    mpz_export(be_bytes, &count, 1, 1, 0, 0, targetInt);
+    for (size_t i = 0; i < 32; ++i) {
+        targetBytes[i] = be_bytes[31 - i];
+    }
+    mpz_clear(targetInt);
+}
+
 void cpyBSymbol(const uint8_t *bound) {
     cudaError_t err = cudaMemcpyToSymbol(bound_, bound, 32);
     if (err != cudaSuccess) {
@@ -118,14 +100,13 @@ void cpyBSymbol(const uint8_t *bound) {
     }
 }
 
-// --- KERNELS ---
-
 __global__ void autolykos2_mining_kernel(
     const uint32_t* dataset,
     const uint8_t* header,
     uint64_t start_nonce,
-    uint32_t target_hi, // unused
+    uint32_t target_hi,
     uint64_t* d_found_nonce_param,
+    uint8_t* d_found_hash_param,
     bool* d_found_flag_param
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -175,7 +156,6 @@ __global__ void autolykos2_mining_kernel(
             ((uint32_t*)r)[j + 1] = ((uint32_t*)(&hsh))[1];
         }
 
-        // Index generation
         uint32_t n_len = AUTOLYKOS2_M;
         for (int k = 0; k < K_LEN; k++) {
             uint32_t val;
@@ -220,40 +200,23 @@ __global__ void autolykos2_mining_kernel(
         uint8_t final_hash[32];
         blake2b_cuda(final_hash, final_input, 40);
 
-        // Compare final_hash with bound_
+        // Compare final_hash with bound_ using 4x uint64_t little-endian words
         bool meets_target = false;
-        for (int i = 31; i >= 0; --i) {
-            if (final_hash[i] < bound_[i]) { meets_target = true; break; }
-            if (final_hash[i] > bound_[i]) { break; }
+        uint64_t* hash64 = (uint64_t*)final_hash;
+        uint64_t* bound64 = (uint64_t*)bound_;
+        for (int i = 3; i >= 0; --i) {
+            if (hash64[i] < bound64[i]) { meets_target = true; break; }
+            if (hash64[i] > bound64[i]) { break; }
         }
         if (meets_target) {
             if (atomicCAS((int*)d_found_flag_param, 0, 1) == 0) {
                 *d_found_nonce_param = nonce;
-                // Could save hash if needed
+                for (int i = 0; i < 32; ++i) d_found_hash_param[i] = final_hash[i];
             }
         }
     }
 }
 
-// CUDA error checking macro
-#define CUDA_CHECK_INIT(call) \
-    do { \
-        cudaError_t err = call; \
-        if (err != cudaSuccess) { \
-            fprintf(stderr, "CUDA error at %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
-            return false; \
-        } \
-    } while(0)
-
-static uint32_t* d_dataset = nullptr;
-static uint8_t* d_header = nullptr;
-static uint64_t* d_found_nonce = nullptr;
-static bool* d_found_flag = nullptr;
-static uint8_t* d_target_boundary = nullptr;
-static uint32_t* h_dataset = nullptr;
-static bool miner_initialized = false;
-
-// Generate Autolykos2 dataset on GPU
 __global__ void generate_dataset_kernel(uint32_t* dataset, const uint8_t* seed, uint32_t start_idx, uint32_t count) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= count) return;
@@ -273,6 +236,24 @@ __global__ void generate_dataset_kernel(uint32_t* dataset, const uint8_t* seed, 
         ((uint32_t)hash[3] << 24);
 }
 
+static uint32_t* d_dataset = nullptr;
+static uint8_t* d_header = nullptr;
+static uint64_t* d_found_nonce = nullptr;
+static uint8_t* d_found_hash = nullptr;
+static bool* d_found_flag = nullptr;
+static uint8_t* d_target_boundary = nullptr;
+static uint32_t* h_dataset = nullptr;
+static bool miner_initialized = false;
+
+#define CUDA_CHECK_INIT(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA error at %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+            return false; \
+        } \
+    } while(0)
+
 bool autolykos2_cuda_init(int device_id) {
     if (miner_initialized) return true;
     CUDA_CHECK_INIT(cudaSetDevice(device_id));
@@ -280,6 +261,7 @@ bool autolykos2_cuda_init(int device_id) {
     CUDA_CHECK_INIT(cudaMalloc(&d_dataset, dataset_size));
     CUDA_CHECK_INIT(cudaMalloc(&d_header, 76));
     CUDA_CHECK_INIT(cudaMalloc(&d_found_nonce, sizeof(uint64_t)));
+    CUDA_CHECK_INIT(cudaMalloc(&d_found_hash, 32));
     CUDA_CHECK_INIT(cudaMalloc(&d_found_flag, sizeof(bool)));
     CUDA_CHECK_INIT(cudaMalloc(&d_target_boundary, 32));
     h_dataset = (uint32_t*)malloc(dataset_size);
@@ -324,6 +306,7 @@ bool autolykos2_cuda_mine(
     uint32_t target_hi,
     const uint8_t* target_boundary,
     uint64_t* found_nonce,
+    uint8_t* found_hash,
     bool* found
 ) {
     if (!miner_initialized) {
@@ -331,11 +314,7 @@ bool autolykos2_cuda_mine(
         return false;
     }
     CUDA_CHECK_INIT(cudaMemcpy(d_header, header, 76, cudaMemcpyHostToDevice));
-
-    // --- endian swap for pool targets ---
-    uint8_t bound_be[32];
-    for (int i = 0; i < 32; ++i) bound_be[i] = target_boundary[31 - i];
-    cpyBSymbol(bound_be);
+    cpyBSymbol(target_boundary);
 
     bool host_found = false;
     CUDA_CHECK_INIT(cudaMemcpy(d_found_flag, &host_found, sizeof(bool), cudaMemcpyHostToDevice));
@@ -348,6 +327,7 @@ bool autolykos2_cuda_mine(
         start_nonce,
         target_hi,
         d_found_nonce,
+        d_found_hash,
         d_found_flag
     );
     CUDA_CHECK_INIT(cudaGetLastError());
@@ -358,6 +338,7 @@ bool autolykos2_cuda_mine(
 
     if (host_found) {
         CUDA_CHECK_INIT(cudaMemcpy(found_nonce, d_found_nonce, sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK_INIT(cudaMemcpy(found_hash, d_found_hash, 32, cudaMemcpyDeviceToHost));
     }
     return true;
 }
@@ -367,6 +348,7 @@ void autolykos2_cuda_cleanup() {
     if (d_dataset) cudaFree(d_dataset);
     if (d_header) cudaFree(d_header);
     if (d_found_nonce) cudaFree(d_found_nonce);
+    if (d_found_hash) cudaFree(d_found_hash);
     if (d_found_flag) cudaFree(d_found_flag);
     if (d_target_boundary) cudaFree(d_target_boundary);
     if (h_dataset) { free(h_dataset); h_dataset = nullptr; }
@@ -401,11 +383,11 @@ bool launchMiningKernel(
         0,
         target,
         &found_nonce_64,
+        foundHash,
         &found
     );
     if (success && found) {
         foundNonce = found_nonce_64;
-        // foundHash - left for extension if needed
         return true;
     }
     return false;

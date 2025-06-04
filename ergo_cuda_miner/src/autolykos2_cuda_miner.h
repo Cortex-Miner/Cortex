@@ -28,7 +28,9 @@ bool autolykos2_cuda_generate_dataset(const uint8_t* seed);
  * @param start_nonce Starting nonce value
  * @param nonce_count Number of nonces to test
  * @param target_hi Upper 32 bits of target (big-endian)
+ * @param target_boundary Pointer to the target boundary
  * @param found_nonce Output: found nonce if successful
+ * @param found_hash Output: hash of the found solution
  * @param found Output: true if valid nonce found
  * @return true on success, false on failure
  */
@@ -37,7 +39,9 @@ bool autolykos2_cuda_mine(
     uint64_t start_nonce,
     uint32_t nonce_count,
     uint32_t target_hi,
-    uint32_t* found_nonce,
+    const uint8_t* target_boundary,
+    uint64_t* found_nonce,
+    uint8_t* found_hash,
     bool* found
 );
 
@@ -60,6 +64,6 @@ void autolykos2_cuda_cleanup();
 
 #ifdef __cplusplus
 }
-#endif
+#endif // __cplusplus
 
 #endif // AUTOLYKOS2_CUDA_MINER_H

@@ -1,0 +1,15 @@
+{
+  "mode": "pool",
+  "solo": {
+    "host": "127.0.0.1",
+    "port": 9053
+  },
+  "address": "9h3dCuaU9BkyriZi2EG4xDagckZ1vGiT8xpXwdvvGtWkH9FnhgZ",
+  "pool": {
+    "host": "65.108.57.232",
+    "port": 3052,
+    "ssl": false,
+    "worker": "9h3dCuaU9BkyriZi2EG4xDagckZ1vGiT8xpXwdvvGtWkH9FnhgZ.Arohbe",
+    "password": "x"
+  }
+}

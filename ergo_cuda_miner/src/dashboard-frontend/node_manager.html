@@ -1,0 +1,131 @@
+<!-- dashboard-frontend/node_manager.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Ergo Node Manager</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 2em; }
+        #log { font-family: monospace; background: #222; color: #c7f464; padding: 1em; height: 200px; overflow-y: auto; }
+        textarea { width: 100%; min-height: 150px; }
+        select, input, button { margin: 0.5em 0; }
+        .status { color: green; margin-left: 1em; }
+        .error { color: red; margin-left: 1em; }
+    </style>
+</head>
+<body>
+<h2>Ergo Node Manager</h2>
+
+<div>
+    <label>Select Ergo Node Version:
+        <select id="releaseSelect"></select>
+    </label>
+    <button id="refreshReleases">Refresh Releases</button>
+</div>
+
+<div>
+    <h4>Node Configuration (`ergo.conf`):</h4>
+    <textarea id="configText" placeholder="Edit your Ergo node config here"></textarea>
+    <div>
+        <button id="deployBtn">Deploy Node</button>
+        <span id="deployStatus"></span>
+    </div>
+</div>
+
+<div id="nodeActions" style="display:none;">
+    <h4>Node Directory: <span id="nodeDir"></span></h4>
+    <button id="startBtn">Start Node</button>
+    <button id="loadConfigBtn">Reload Config</button>
+    <button id="saveConfigBtn">Save Config</button>
+    <span id="startStatus"></span>
+</div>
+
+<div id="logSection" style="display:none;">
+    <h4>Node Log:</h4>
+    <div id="log"></div>
+</div>
+
+<script type="module">
+import {
+    getReleases, deployNode, startNode, getConfig, saveConfig, getLog
+} from './node_manager.js';
+
+let releases = [];
+let currentNodeDir = '';
+
+async function populateReleases() {
+    document.getElementById('releaseSelect').innerHTML = '<option>Loading...</option>';
+    try {
+        releases = await getReleases();
+        const sel = document.getElementById('releaseSelect');
+        sel.innerHTML = '';
+        releases.forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = r.tag_name;
+            opt.innerText = `${r.tag_name} (${r.published_at.substring(0, 10)})`;
+            sel.appendChild(opt);
+        });
+    } catch (e) {
+        alert('Failed to fetch releases');
+    }
+}
+
+document.getElementById('refreshReleases').onclick = populateReleases;
+
+document.getElementById('deployBtn').onclick = async () => {
+    const version = document.getElementById('releaseSelect').value;
+    const configText = document.getElementById('configText').value;
+    document.getElementById('deployStatus').innerText = 'Deploying...';
+    const res = await deployNode(version, configText);
+    if (res.status === 'ok') {
+        currentNodeDir = res.node_dir;
+        document.getElementById('nodeDir').innerText = currentNodeDir;
+        document.getElementById('deployStatus').innerHTML = '<span class="status">Node deployed!</span>';
+        document.getElementById('nodeActions').style.display = '';
+        document.getElementById('logSection').style.display = '';
+        loadLogLoop();
+    } else {
+        document.getElementById('deployStatus').innerHTML = `<span class="error">${res.error}</span>`;
+    }
+};
+
+document.getElementById('startBtn').onclick = async () => {
+    document.getElementById('startStatus').innerText = 'Starting...';
+    const res = await startNode(currentNodeDir);
+    if (res.status === 'ok') {
+        document.getElementById('startStatus').innerHTML = '<span class="status">Node started!</span>';
+    } else {
+        document.getElementById('startStatus').innerHTML = `<span class="error">${res.error}</span>`;
+    }
+};
+
+document.getElementById('loadConfigBtn').onclick = async () => {
+    const res = await getConfig(currentNodeDir);
+    if (res.status === 'ok') {
+        document.getElementById('configText').value = res.config;
+    } else {
+        alert(res.error || 'Failed to load config');
+    }
+};
+
+document.getElementById('saveConfigBtn').onclick = async () => {
+    const configText = document.getElementById('configText').value;
+    const res = await saveConfig(currentNodeDir, configText);
+    if (res.status === 'ok') {
+        alert('Config saved!');
+    } else {
+        alert(res.error || 'Failed to save config');
+    }
+};
+
+async function loadLogLoop() {
+    if (!currentNodeDir) return;
+    const log = await getLog(currentNodeDir);
+    document.getElementById('log').innerText = log || '';
+    setTimeout(loadLogLoop, 2000);
+}
+
+populateReleases();
+</script>
+</body>
+</html>
